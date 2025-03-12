@@ -1,4 +1,4 @@
-package client
+package common
 
 import (
 	"context"
@@ -8,10 +8,11 @@ import (
 
 var DataLength = 8
 
-type connMsg struct {
+type ConnMsg struct {
 }
 
-func (c *connMsg) readMsg(ctx context.Context, conn net.Conn) ([]byte, error) {
+// 读响应
+func (c *ConnMsg) ReadMsg(ctx context.Context, conn net.Conn) ([]byte, error) {
 	dataLengthBs := make([]byte, DataLength)
 	_, err := conn.Read(dataLengthBs)
 	if err != nil {
@@ -27,7 +28,8 @@ func (c *connMsg) readMsg(ctx context.Context, conn net.Conn) ([]byte, error) {
 	return respBs, nil
 }
 
-func (c *connMsg) writeMsg(ctx context.Context, conn net.Conn, data []byte) error {
+// 写请求
+func (c *ConnMsg) WriteMsg(ctx context.Context, conn net.Conn, data []byte) error {
 	reqBs := make([]byte, DataLength+len(data))
 	binary.BigEndian.PutUint64(reqBs[:DataLength], uint64(len(data)))
 	copy(reqBs[DataLength:], data)

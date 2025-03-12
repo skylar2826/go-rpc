@@ -4,17 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/silenceper/pool"
+	"go-geektime3/common"
+	"go-geektime3/serializer"
 	"net"
+	"reflect"
 	"time"
 )
 
 type Client struct {
-	connMsg
-	pool pool.Pool
+	common.ConnMsg
+	pool       pool.Pool
+	serializer serializer.Serializer
 }
 
-func (c *Client) invoke(ctx context.Context, request *Request) (*Response, error) {
-	reqBs, err := json.Marshal(request)
+func (c *Client) Invoke(ctx context.Context, request *common.Request) (*common.Response, error) {
+	reqBs, err := request.Encode()
 	if err != nil {
 		return nil, err
 	}
@@ -23,8 +27,8 @@ func (c *Client) invoke(ctx context.Context, request *Request) (*Response, error
 	if err != nil {
 		return nil, err
 	}
-	resp := &Response{}
-	err = json.Unmarshal(respBs, resp)
+	resp := &common.Response{}
+	err = resp.Decode(respBs)
 	if err != nil {
 		return nil, err
 	}
@@ -39,14 +43,14 @@ func (c *Client) Send(ctx context.Context, req []byte) ([]byte, error) {
 	}
 
 	conn := p.(net.Conn)
-	err = c.writeMsg(ctx, conn, req)
+	err = c.WriteMsg(ctx, conn, req)
 	if err != nil {
 		_ = c.pool.Close(p)
 		return nil, err
 	}
 
 	var respBs []byte
-	respBs, err = c.readMsg(ctx, conn)
+	respBs, err = c.ReadMsg(ctx, conn)
 	if err != nil {
 		_ = c.pool.Close(p)
 		return nil, err
@@ -54,7 +58,78 @@ func (c *Client) Send(ctx context.Context, req []byte) ([]byte, error) {
 	return respBs, nil
 }
 
-func NewClient(addr string, timeout time.Duration) (*Client, error) {
+func (c *Client) BindProxy(s common.Service) error {
+	typ := reflect.TypeOf(s)
+	val := reflect.ValueOf(s)
+
+	for typ.Kind() == reflect.Ptr {
+		typ = typ.Elem()
+		val = val.Elem()
+	}
+
+	numField := typ.NumField()
+	for i := 0; i < numField; i++ {
+		fTyp := typ.Field(i)
+		fVal := val.Field(i)
+
+		if fVal.CanSet() {
+			fn := reflect.MakeFunc(fTyp.Type, func(args []reflect.Value) (results []reflect.Value) {
+				ctx := args[0].Interface().(context.Context)
+				reqData, err := json.Marshal(args[1].Interface())
+				resVal := reflect.New(fTyp.Type.Out(0).Elem())
+				if err != nil {
+					return []reflect.Value{
+						resVal,
+						reflect.ValueOf(err),
+					}
+				}
+
+				req := &common.Request{
+					Serializer:  c.serializer.Code(),
+					ServiceName: s.Name(),
+					MethodName:  fTyp.Name,
+					Data:        reqData,
+				}
+
+				var res *common.Response
+				res, err = c.Invoke(ctx, req)
+				if err != nil {
+					return []reflect.Value{
+						resVal,
+						reflect.ValueOf(err),
+					}
+				}
+
+				err = json.Unmarshal(res.Data, resVal.Interface())
+				if err != nil {
+					return []reflect.Value{
+						resVal,
+						reflect.ValueOf(err),
+					}
+				}
+
+				return []reflect.Value{
+					resVal,
+					reflect.Zero(reflect.TypeOf(new(error)).Elem()),
+				}
+			})
+
+			fVal.Set(fn)
+		}
+	}
+
+	return nil
+}
+
+type Opt func(c *Client)
+
+func WithSerializer(serializer serializer.Serializer) Opt {
+	return func(c *Client) {
+		c.serializer = serializer
+	}
+}
+
+func NewClient(addr string, timeout time.Duration, opts ...Opt) (*Client, error) {
 	conn, err := pool.NewChannelPool(&pool.Config{
 		InitialCap: 1,
 		MaxCap:     30,
@@ -71,7 +146,16 @@ func NewClient(addr string, timeout time.Duration) (*Client, error) {
 		return nil, err
 	}
 
-	return &Client{
-		pool: conn,
-	}, nil
+	c := &Client{
+		pool:       conn,
+		serializer: &serializer.Json{},
+	}
+
+	for _, opt := range opts {
+		opt(c)
+	}
+
+	return c, nil
 }
+
+var _ common.Proxy = &Client{}

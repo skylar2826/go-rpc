@@ -2,20 +2,23 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"go-geektime3/common"
+	"go-geektime3/serializer"
 	"log"
 	"net"
 	"reflect"
+	"strconv"
 )
 
 type Server struct {
-	connMsg
-	addr     string
-	services map[string]service
+	common.ConnMsg
+	addr        string
+	services    map[string]common.Service
+	serializers map[string]serializer.Serializer
 }
 
-func (s *Server) invoke(ctx context.Context, request *Request) (*Response, error) {
+func (s *Server) Invoke(ctx context.Context, request *common.Request) (*common.Response, error) {
 	si, ok := s.services[request.ServiceName]
 	if !ok {
 		return nil, fmt.Errorf("服务不存在 %s\n", request.ServiceName)
@@ -32,7 +35,12 @@ func (s *Server) invoke(ctx context.Context, request *Request) (*Response, error
 	in[0] = reflect.ValueOf(si)
 	in[1] = reflect.ValueOf(ctx)
 	req := reflect.New(method.Type.In(2).Elem())
-	err := json.Unmarshal(request.Args, req.Interface())
+
+	// 获取序列化协议
+	serializerCode := request.Serializer
+	sl := s.serializers[strconv.Itoa(int(serializerCode))]
+	// 解码请求参数
+	err := sl.DeCode(request.Data, req.Interface())
 	if err != nil {
 		return nil, err
 	}
@@ -42,18 +50,19 @@ func (s *Server) invoke(ctx context.Context, request *Request) (*Response, error
 		return nil, result[1].Interface().(error)
 	}
 	var data []byte
-	data, err = json.Marshal(result[0].Interface())
+	// 编码数据
+	data, err = sl.Encode(result[0].Interface())
 	if err != nil {
 		return nil, err
 	}
-	return &Response{
+	return &common.Response{
 		Data: data,
 	}, nil
 }
 
-func (s *Server) RegisterService(services ...service) *Server {
+func (s *Server) RegisterService(services ...common.Service) *Server {
 	if s.services == nil {
-		s.services = make(map[string]service, len(services))
+		s.services = make(map[string]common.Service, len(services))
 	}
 	for _, si := range services {
 		s.services[si.Name()] = si
@@ -79,13 +88,17 @@ func (s *Server) Start() {
 
 		ctx := context.Background()
 
-		var resp *Response
+		var resp *common.Response
 		var respBs []byte
 
 		var handleErr = func() {
-			resp.Data = []byte("error")
-			respBs, err = json.Marshal(resp)
-			err = s.writeMsg(ctx, conn, respBs)
+			resp.Error = []byte("error")
+			respBs, err = resp.Encode()
+			if err != nil {
+				log.Println(err)
+				return
+			}
+			err = s.WriteMsg(ctx, conn, respBs)
 			if err != nil {
 				log.Println(err)
 				return
@@ -93,26 +106,28 @@ func (s *Server) Start() {
 		}
 
 		var reqBs []byte
-		reqBs, err = s.readMsg(ctx, conn)
+		// 读数据包
+		reqBs, err = s.ReadMsg(ctx, conn)
 		if err != nil {
 			handleErr()
 		}
-		req := &Request{}
-		err = json.Unmarshal(reqBs, req)
+		req := &common.Request{}
+		// 对请求解码
+		err = req.Decode(reqBs)
 		if err != nil {
 			handleErr()
 		}
 
-		resp, err = s.invoke(ctx, req)
+		resp, err = s.Invoke(ctx, req)
 		if err != nil {
 			handleErr()
 		}
 
-		respBs, err = json.Marshal(resp)
+		respBs, err = resp.Encode()
 		if err != nil {
 			handleErr()
 		}
-		err = s.writeMsg(ctx, conn, respBs)
+		err = s.WriteMsg(ctx, conn, respBs)
 		if err != nil {
 			log.Println(err)
 			return
@@ -120,8 +135,28 @@ func (s *Server) Start() {
 	}
 }
 
-func NewServer(addr string) *Server {
-	return &Server{
-		addr: addr,
+type Opt func(c *Server)
+
+func WithSerializer(serializer serializer.Serializer) Opt {
+	return func(c *Server) {
+		c.serializers[strconv.Itoa(int(serializer.Code()))] = serializer
 	}
 }
+
+func NewServer(addr string, opts ...Opt) *Server {
+	j := &serializer.Json{}
+	s := &Server{
+		addr: addr,
+		serializers: map[string]serializer.Serializer{
+			strconv.Itoa(int(j.Code())): j,
+		},
+	}
+
+	for _, opt := range opts {
+		opt(s)
+	}
+
+	return s
+}
+
+var _ common.Proxy = &Server{}

@@ -8,10 +8,11 @@ import (
 	"go-geektime3/server"
 	user_service2 "go-geektime3/server/user_service"
 	"log"
+	"testing"
 	"time"
 )
 
-func main() {
+func TestRPC(t *testing.T) {
 	go func() {
 		s := server.NewServer("127.0.0.1:8080")
 		userServiceServer := &user_service2.UserService{}
@@ -29,8 +30,7 @@ func main() {
 			return
 		}
 		userServiceClient := &user_service.UserService{}
-		// 给service绑定proxy
-		err = c.BindProxy(userServiceClient)
+		err = client.BindProxy(userServiceClient, c)
 		if err != nil {
 			log.Println(err)
 			return
