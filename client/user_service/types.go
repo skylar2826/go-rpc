@@ -11,6 +11,5 @@ type UserServiceReq struct {
 }
 
 type UserServiceResp struct {
-	Data   *User  `json:"data"`
-	ErrMsg string `json:"errMsg"`
+	Data *User `json:"data"`
 }

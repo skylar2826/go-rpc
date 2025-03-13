@@ -53,7 +53,10 @@ func (r *Response) Decode(bs []byte) error {
 	r.Version = bs[12]
 	r.Compressor = bs[13]
 	r.Serializer = bs[14]
-	r.Error = bs[15:r.HeadLength]
+	if r.HeadLength > 14 {
+		r.Error = bs[15:r.HeadLength]
+	}
+
 	r.Data = bs[r.HeadLength:]
 	return nil
 }

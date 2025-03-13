@@ -1,6 +1,9 @@
 package user_service
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type User struct {
 	Id        int    `json:"id"`
@@ -15,6 +18,7 @@ func (u *UserService) Name() string {
 }
 
 func (u *UserService) GetUserById(ctx context.Context, UserServiceReq *UserServiceReq) (*UserServiceResp, error) {
+	time.Sleep(time.Second)
 	return &UserServiceResp{
 		Data: &User{
 			Id:        UserServiceReq.Id,

@@ -9,12 +9,13 @@ import (
 	"net"
 	"reflect"
 	"strconv"
+	"time"
 )
 
 type Server struct {
 	common.ConnMsg
 	addr        string
-	services    map[string]common.Service
+	services    map[string]*ReflectionStub
 	serializers map[string]serializer.Serializer
 }
 
@@ -24,48 +25,57 @@ func (s *Server) Invoke(ctx context.Context, request *common.Request) (*common.R
 		return nil, fmt.Errorf("服务不存在 %s\n", request.ServiceName)
 	}
 
-	typ := reflect.TypeOf(si)
-	var method reflect.Method
-	method, ok = typ.MethodByName(request.MethodName)
-	if !ok {
-		return nil, fmt.Errorf("服务 %s 上的方法 %s 不存在 \n", request.ServiceName, request.MethodName)
+	resp := &common.Response{
+		Serializer: request.Serializer,
 	}
 
-	in := make([]reflect.Value, 3)
-	in[0] = reflect.ValueOf(si)
-	in[1] = reflect.ValueOf(ctx)
-	req := reflect.New(method.Type.In(2).Elem())
+	var cancel context.CancelFunc = func() {
 
-	// 获取序列化协议
-	serializerCode := request.Serializer
-	sl := s.serializers[strconv.Itoa(int(serializerCode))]
-	// 解码请求参数
-	err := sl.DeCode(request.Data, req.Interface())
+	}
+	deadline, err :=
+		strconv.ParseInt(request.Meta["deadline"], 10, 64)
 	if err != nil {
-		return nil, err
+		log.Println("超时时间解析错误", err)
+	} else {
+		ctx, cancel = context.WithDeadline(ctx, time.UnixMilli(deadline))
 	}
-	in[2] = req
-	result := method.Func.Call(in)
-	if result[1].Interface() != nil {
-		return nil, result[1].Interface().(error)
+
+	var hasOneWay string
+	hasOneWay, ok = request.Meta["one-way"]
+	if ok && hasOneWay == "true" {
+		go func() {
+			_, err = si.Invoke(ctx, request)
+			if err != nil {
+				log.Println(err)
+				return
+			}
+		}()
+		resp.Error = []byte("已开启异步调用，无返回值")
+		cancel()
+	} else {
+		var respData []byte
+		respData, err = si.Invoke(ctx, request)
+		if err != nil {
+			resp.Error = []byte(err.Error())
+			cancel()
+			return resp, nil
+		}
+		resp.Data = respData
 	}
-	var data []byte
-	// 编码数据
-	data, err = sl.Encode(result[0].Interface())
-	if err != nil {
-		return nil, err
-	}
-	return &common.Response{
-		Data: data,
-	}, nil
+	defer cancel()
+
+	return resp, nil
 }
 
 func (s *Server) RegisterService(services ...common.Service) *Server {
 	if s.services == nil {
-		s.services = make(map[string]common.Service, len(services))
+		s.services = make(map[string]*ReflectionStub, len(services))
 	}
 	for _, si := range services {
-		s.services[si.Name()] = si
+		s.services[si.Name()] = &ReflectionStub{
+			service:     si,
+			serializers: s.serializers,
+		}
 	}
 	return s
 }
@@ -91,8 +101,8 @@ func (s *Server) Start() {
 		var resp *common.Response
 		var respBs []byte
 
-		var handleErr = func() {
-			resp.Error = []byte("error")
+		var handleErr = func(err error) {
+			resp.Error = []byte(err.Error())
 			respBs, err = resp.Encode()
 			if err != nil {
 				log.Println(err)
@@ -109,24 +119,25 @@ func (s *Server) Start() {
 		// 读数据包
 		reqBs, err = s.ReadMsg(ctx, conn)
 		if err != nil {
-			handleErr()
+			handleErr(err)
 		}
 		req := &common.Request{}
 		// 对请求解码
 		err = req.Decode(reqBs)
 		if err != nil {
-			handleErr()
+			handleErr(err)
 		}
 
 		resp, err = s.Invoke(ctx, req)
 		if err != nil {
-			handleErr()
+			handleErr(err)
 		}
 
 		respBs, err = resp.Encode()
 		if err != nil {
-			handleErr()
+			handleErr(err)
 		}
+
 		err = s.WriteMsg(ctx, conn, respBs)
 		if err != nil {
 			log.Println(err)
@@ -157,6 +168,45 @@ func NewServer(addr string, opts ...Opt) *Server {
 	}
 
 	return s
+}
+
+type ReflectionStub struct {
+	serializers map[string]serializer.Serializer
+	service     common.Service
+}
+
+func (r *ReflectionStub) Invoke(ctx context.Context, request *common.Request) ([]byte, error) {
+	typ := reflect.TypeOf(r.service)
+	method, ok := typ.MethodByName(request.MethodName)
+	if !ok {
+		return nil, fmt.Errorf("服务 %s 上的方法 %s 不存在 \n", request.ServiceName, request.MethodName)
+	}
+
+	in := make([]reflect.Value, 3)
+	in[0] = reflect.ValueOf(r.service)
+	in[1] = reflect.ValueOf(ctx)
+	methodIn := reflect.New(method.Type.In(2).Elem())
+
+	// 获取序列化协议
+	serializerCode := request.Serializer
+	sl := r.serializers[strconv.Itoa(int(serializerCode))]
+	// 解码请求参数
+	err := sl.DeCode(request.Data, methodIn.Interface())
+	if err != nil {
+		return nil, err
+	}
+	in[2] = methodIn
+	result := method.Func.Call(in)
+	if result[1].Interface() != nil {
+		return nil, result[1].Interface().(error)
+	}
+	var data []byte
+	// 编码数据
+	data, err = sl.Encode(result[0].Interface())
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 var _ common.Proxy = &Server{}

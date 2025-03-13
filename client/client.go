@@ -3,11 +3,13 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/silenceper/pool"
 	"go-geektime3/common"
 	"go-geektime3/serializer"
 	"net"
 	"reflect"
+	"strconv"
 	"time"
 )
 
@@ -84,23 +86,52 @@ func (c *Client) BindProxy(s common.Service) error {
 					}
 				}
 
+				meta := make(map[string]string, 2)
+				if hasOneWay := common.HasOneWay(ctx); hasOneWay {
+					meta["one-way"] = "true"
+				}
+				if deadline, ok := ctx.Deadline(); ok {
+					meta["deadline"] = strconv.FormatInt(deadline.UnixMilli(), 10)
+				}
+
 				req := &common.Request{
 					Serializer:  c.serializer.Code(),
 					ServiceName: s.Name(),
 					MethodName:  fTyp.Name,
+					Meta:        meta,
 					Data:        reqData,
 				}
 
+				ch := make(chan struct{})
+
 				var res *common.Response
-				res, err = c.Invoke(ctx, req)
+				go func() {
+					res, err = c.Invoke(ctx, req)
+					ch <- struct{}{}
+					close(ch)
+				}()
+
+				select {
+				case <-ctx.Done():
+					err = ctx.Err()
+				case <-ch:
+
+				}
+
 				if err != nil {
 					return []reflect.Value{
 						resVal,
 						reflect.ValueOf(err),
 					}
 				}
+				if len(res.Error) > 0 {
+					return []reflect.Value{
+						resVal,
+						reflect.ValueOf(errors.New(string(res.Error))),
+					}
+				}
 
-				err = json.Unmarshal(res.Data, resVal.Interface())
+				err = c.serializer.DeCode(res.Data, resVal.Interface())
 				if err != nil {
 					return []reflect.Value{
 						resVal,
